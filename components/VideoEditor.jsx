@@ -10,22 +10,29 @@ export default function VideoEditor() {
   const [processing, setProcessing] = useState(false);
   const [outputUrl, setOutputUrl] = useState(null);
   const [progress, setProgress] = useState(0);
+
+  // Crop state – exactly like PhotoEditor
   const [cropMode, setCropMode] = useState(false);
-  const [crop, setCrop] = useState(null); // { x, y, w, h } as fractions (0-1)
-  const [videoDimensions, setVideoDimensions] = useState({ width: 0, height: 0 });
+  const [cropRect, setCropRect] = useState(null);       // { x, y, w, h } in video pixels
+  const [appliedCrop, setAppliedCrop] = useState(null);  // crop used for display/export
+  const cropDragInfo = useRef(null);                     // { type: 'move'|'handle', ... }
 
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const animFrameRef = useRef(null);
-  const cropDragInfo = useRef(null);
+  const videoDimensions = useRef({ width: 0, height: 0 });
 
+  // ─── Load video ──────────────────────────────────────────
   const handleFile = (e) => {
     const file = e.target.files[0];
     if (!file) return;
     const url = URL.createObjectURL(file);
     setVideoSrc(url);
     setOutputUrl(null);
-    setCrop(null);
+    setCropRect(null);
+    setAppliedCrop(null);
+    setCropMode(false);
+    cropDragInfo.current = null;
   };
 
   const handleLoadedMetadata = () => {
@@ -33,59 +40,108 @@ export default function VideoEditor() {
     if (video) {
       setDuration(video.duration);
       setEndTime(Math.min(video.duration, 10));
-      setVideoDimensions({ width: video.videoWidth, height: video.videoHeight });
-      if (!crop) {
-        setCrop({ x: 0, y: 0, w: 1, h: 1 }); // full frame
-      }
+      videoDimensions.current = {
+        width: video.videoWidth,
+        height: video.videoHeight,
+      };
+      const full = { x: 0, y: 0, w: video.videoWidth, h: video.videoHeight };
+      setCropRect(full);
+      setAppliedCrop(full);
     }
   };
 
   const getFilterString = () => {
     switch (filter) {
       case 'grayscale': return 'grayscale(1)';
-      case 'sepia': return 'sepia(0.8)';
-      case 'invert': return 'invert(1)';
-      default: return 'none';
+      case 'sepia':    return 'sepia(0.8)';
+      case 'invert':   return 'invert(1)';
+      default:         return 'none';
     }
   };
 
+  // ─── Draw the canvas (works exactly like PhotoEditor) ────
   const drawFrame = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (!video || !canvas || !crop) return;
+    if (!video || !canvas) return;
 
     const ctx = canvas.getContext('2d');
-    canvas.width = videoDimensions.width * crop.w;
-    canvas.height = videoDimensions.height * crop.h;
+    const vw = videoDimensions.current.width;
+    const vh = videoDimensions.current.height;
+
+    // During crop mode, canvas stays at full video size (like the original image in PhotoEditor)
+    if (cropMode) {
+      canvas.width = vw;
+      canvas.height = vh;
+    } else {
+      // After crop applied, canvas shows only the cropped area
+      const crop = appliedCrop || { x: 0, y: 0, w: vw, h: vh };
+      canvas.width = crop.w;
+      canvas.height = crop.h;
+    }
 
     ctx.filter = getFilterString();
-    ctx.drawImage(
-      video,
-      crop.x * videoDimensions.width, crop.y * videoDimensions.height,
-      crop.w * videoDimensions.width, crop.h * videoDimensions.height,
-      0, 0, canvas.width, canvas.height
-    );
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (cropMode) {
+      // Full frame with overlay
+      ctx.drawImage(video, 0, 0, vw, vh);
+    } else {
+      // Cropped view
+      const crop = appliedCrop || { x: 0, y: 0, w: vw, h: vh };
+      ctx.drawImage(video, crop.x, crop.y, crop.w, crop.h, 0, 0, canvas.width, canvas.height);
+    }
     ctx.filter = 'none';
 
-    if (!video.paused && !video.ended) {
-      animFrameRef.current = requestAnimationFrame(drawFrame);
-    }
-  }, [filter, crop, videoDimensions]);
+    // Crop overlay (only in crop mode and when a rectangle exists)
+    if (cropMode && cropRect) {
+      // Green rectangle
+      ctx.strokeStyle = '#00ff00';
+      ctx.lineWidth = 4;
+      ctx.strokeRect(cropRect.x, cropRect.y, cropRect.w, cropRect.h);
 
-  useEffect(() => {
+      // Yellow corner handles (16x16)
+      const handles = [
+        [cropRect.x, cropRect.y],
+        [cropRect.x + cropRect.w, cropRect.y],
+        [cropRect.x, cropRect.y + cropRect.h],
+        [cropRect.x + cropRect.w, cropRect.y + cropRect.h],
+      ];
+      handles.forEach(([hx, hy]) => {
+        ctx.fillStyle = '#ff0';
+        ctx.fillRect(hx - 8, hy - 8, 16, 16);
+      });
+    }
+  }, [filter, cropMode, cropRect, appliedCrop]);
+
+  // Animation loop (while playing)
+  const animationLoop = useCallback(() => {
     drawFrame();
+    const video = videoRef.current;
+    if (video && !video.paused && !video.ended) {
+      animFrameRef.current = requestAnimationFrame(animationLoop);
+    }
   }, [drawFrame]);
 
+  useEffect(() => { drawFrame(); }, [drawFrame]);
+
   const handlePlay = () => {
-    animFrameRef.current = requestAnimationFrame(drawFrame);
+    if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    animFrameRef.current = requestAnimationFrame(animationLoop);
   };
   const handlePause = () => {
     if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    drawFrame();
   };
 
-  // Crop interactions on canvas
+  const seekToStart = () => {
+    if (videoRef.current) videoRef.current.currentTime = startTime;
+  };
+
+  // ─── Mouse helpers (identical to PhotoEditor) ────────────
   const getCanvasCoords = (e) => {
     const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
     const scaleY = canvas.height / rect.height;
@@ -95,45 +151,132 @@ export default function VideoEditor() {
     };
   };
 
-  const handleCanvasMouseDown = (e) => {
-    if (!cropMode || !crop) return;
-    const { x, y } = getCanvasCoords(e);
-    // Simplified: start moving crop region
-    cropDragInfo.current = { startX: x, startY: y, origCrop: { ...crop } };
+  const handleMouseDown = (e) => {
+    if (!cropMode || !cropRect) return;
+    const { x: mx, y: my } = getCanvasCoords(e);
+
+    // Check handles (hit radius = 20px for big handles)
+    const handles = [
+      { x: cropRect.x, y: cropRect.y },
+      { x: cropRect.x + cropRect.w, y: cropRect.y },
+      { x: cropRect.x, y: cropRect.y + cropRect.h },
+      { x: cropRect.x + cropRect.w, y: cropRect.y + cropRect.h },
+    ];
+    let handle = null;
+    for (const h of handles) {
+      if (Math.abs(mx - h.x) < 20 && Math.abs(my - h.y) < 20) {
+        handle = h;
+        break;
+      }
+    }
+    if (handle) {
+      cropDragInfo.current = { type: 'handle', handle, startX: mx, startY: my, origRect: { ...cropRect } };
+      return;
+    }
+
+    // Inside rectangle → move
+    if (mx >= cropRect.x && mx <= cropRect.x + cropRect.w &&
+        my >= cropRect.y && my <= cropRect.y + cropRect.h) {
+      cropDragInfo.current = { type: 'move', startX: mx, startY: my, origX: cropRect.x, origY: cropRect.y };
+      return;
+    }
+
+    // Click outside → start drawing a new rectangle (just like PhotoEditor!)
+    // We'll set a flag to draw a new rectangle? Actually in PhotoEditor, you drag to draw,
+    // but the current logic doesn't draw new rectangles on click; it only moves/resizes.
+    // To be exactly like PhotoEditor: we need drawing mode. Let's add it.
+    // However, the user hasn't complained about missing draw-new-rect in PhotoEditor,
+    // but we can add a simple "draw new rectangle" behavior:
+    // If no drag info was set, we start a new rectangle from this point.
+    // For simplicity, we'll just reset the cropRect to a zero-size at mouse point.
+    // But that would erase the existing rectangle instantly. Better: allow dragging from outside
+    // to create a new rectangle. Let's implement the same drawing logic from earlier attempts.
+    // I'll add a 'drawing' state similar to PhotoEditor (but PhotoEditor doesn't draw new rectangles either – it only moves/resizes). The user didn't mention drawing; they just want move/resize.
+    // So we'll leave it as move/resize only, and if they want to change the rectangle drastically, they can click "Reset Crop" or re-enter crop mode.
+    // However, the original PhotoEditor also allows drawing new rectangles? No, in the PhotoEditor, entering crop mode sets a default rectangle, and you can only move/resize. There's no drawing. So we'll stick with that.
+    return;
   };
 
-  const handleCanvasMouseMove = (e) => {
+  const handleMouseMove = (e) => {
     if (!cropMode || !cropDragInfo.current) return;
-    const { x, y } = getCanvasCoords(e);
+    const { x: mx, y: my } = getCanvasCoords(e);
     const info = cropDragInfo.current;
-    const dx = (x - info.startX) / canvasRef.current.width; // fraction
-    const dy = (y - info.startY) / canvasRef.current.height;
-    // Move crop (simple translation)
-    const newCrop = {
-      x: Math.max(0, Math.min(info.origCrop.x + dx, 1 - info.origCrop.w)),
-      y: Math.max(0, Math.min(info.origCrop.y + dy, 1 - info.origCrop.h)),
-      w: info.origCrop.w,
-      h: info.origCrop.h,
-    };
-    setCrop(newCrop);
+    const orig = info.origRect;
+    let newRect = { ...cropRect };
+
+    if (info.type === 'move') {
+      const dx = mx - info.startX;
+      const dy = my - info.startY;
+      const vw = videoDimensions.current.width;
+      const vh = videoDimensions.current.height;
+      newRect.x = Math.max(0, Math.min(info.origX + dx, vw - newRect.w));
+      newRect.y = Math.max(0, Math.min(info.origY + dy, vh - newRect.h));
+    } else if (info.type === 'handle') {
+      const dx = mx - info.startX;
+      const dy = my - info.startY;
+      const handle = info.handle;
+
+      if (handle.x === orig.x) { // left side
+        newRect.x = Math.min(orig.x + orig.w - 10, orig.x + dx);
+        newRect.w = orig.w - (newRect.x - orig.x);
+      } else { // right side
+        newRect.w = Math.max(10, orig.w + dx);
+      }
+      if (handle.y === orig.y) { // top side
+        newRect.y = Math.min(orig.y + orig.h - 10, orig.y + dy);
+        newRect.h = orig.h - (newRect.y - orig.y);
+      } else { // bottom side
+        newRect.h = Math.max(10, orig.h + dy);
+      }
+
+      // Clamp to video bounds
+      newRect.x = Math.max(0, newRect.x);
+      newRect.y = Math.max(0, newRect.y);
+      if (newRect.x + newRect.w > videoDimensions.current.width) newRect.w = videoDimensions.current.width - newRect.x;
+      if (newRect.y + newRect.h > videoDimensions.current.height) newRect.h = videoDimensions.current.height - newRect.y;
+    }
+    setCropRect(newRect);
   };
 
-  const handleCanvasMouseUp = () => {
+  const handleMouseUp = () => {
     cropDragInfo.current = null;
   };
 
-  const toggleCropMode = () => {
-    setCropMode(!cropMode);
-    if (!crop) {
-      setCrop({ x: 0, y: 0, w: 1, h: 1 });
+  // ─── Crop control buttons ────────────────────────────────
+  const enterCropMode = () => {
+    if (!videoDimensions.current.width) {
+      alert('Upload a video first');
+      return;
     }
+    setCropMode(true);
+    // Use applied crop as starting rectangle, or full frame
+    setCropRect(appliedCrop || { x: 0, y: 0, w: videoDimensions.current.width, h: videoDimensions.current.height });
+    cropDragInfo.current = null;
+    videoRef.current?.pause();
   };
 
-  // Export with crop + filter
+  const applyCrop = () => {
+    setAppliedCrop(cropRect);
+    setCropMode(false);
+  };
+
+  const cancelCrop = () => {
+    setCropRect(appliedCrop);
+    setCropMode(false);
+  };
+
+  const resetCrop = () => {
+    const full = { x: 0, y: 0, w: videoDimensions.current.width, h: videoDimensions.current.height };
+    setCropRect(full);
+    setAppliedCrop(full);
+    setCropMode(false);
+  };
+
+  // ─── Export ──────────────────────────────────────────────
   const exportVideo = async () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (!video || !canvas || !crop) return;
+    if (!video || !canvas) return;
 
     setProcessing(true);
     setProgress(0);
@@ -155,7 +298,6 @@ export default function VideoEditor() {
     };
 
     recorder.start();
-
     video.currentTime = startTime;
     video.play();
 
@@ -172,13 +314,11 @@ export default function VideoEditor() {
 
     const drawDuringExport = () => {
       const ctx = canvas.getContext('2d');
+      const crop = appliedCrop || { x: 0, y: 0, w: videoDimensions.current.width, h: videoDimensions.current.height };
+      canvas.width = crop.w;
+      canvas.height = crop.h;
       ctx.filter = getFilterString();
-      ctx.drawImage(
-        video,
-        crop.x * videoDimensions.width, crop.y * videoDimensions.height,
-        crop.w * videoDimensions.width, crop.h * videoDimensions.height,
-        0, 0, canvas.width, canvas.height
-      );
+      ctx.drawImage(video, crop.x, crop.y, crop.w, crop.h, 0, 0, crop.w, crop.h);
       ctx.filter = 'none';
       if (recorder.state === 'recording') {
         animFrameRef.current = requestAnimationFrame(drawDuringExport);
@@ -209,21 +349,26 @@ export default function VideoEditor() {
             onPause={handlePause}
           />
 
+          {cropMode && (
+            <div className="bg-yellow-100 text-yellow-900 p-3 rounded-xl text-sm max-w-xl w-full text-center">
+              🟩 Drag the <b>yellow corners</b> to resize. Click inside the rectangle and drag to move.
+            </div>
+          )}
+
           <canvas
             ref={canvasRef}
             className="max-w-full rounded-xl border-2 border-primary shadow-2xl"
             style={{ width: '100%', maxHeight: '70vh', objectFit: 'contain' }}
-            onMouseDown={handleCanvasMouseDown}
-            onMouseMove={handleCanvasMouseMove}
-            onMouseUp={handleCanvasMouseUp}
-            onMouseLeave={handleCanvasMouseUp}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseUp}
           />
 
           <div className="flex flex-wrap gap-4 justify-center items-center">
             <button onClick={() => videoRef.current?.play()} className="px-4 py-2 bg-accent text-white rounded-lg">▶ Play</button>
             <button onClick={() => videoRef.current?.pause()} className="px-4 py-2 bg-muted text-white rounded-lg">⏸ Pause</button>
-            <button onClick={() => { videoRef.current.currentTime = startTime; }} className="px-4 py-2 bg-secondary text-white rounded-lg">⏪ Seek Start</button>
-            <button onClick={toggleCropMode} className={`px-4 py-2 rounded-lg ${cropMode ? 'bg-yellow-500 text-black' : 'bg-surface'}`}>✂ Crop {cropMode ? '(on)' : '(off)'}</button>
+            <button onClick={seekToStart} className="px-4 py-2 bg-secondary text-white rounded-lg">⏪ Seek Start</button>
           </div>
 
           <div className="flex flex-col gap-2 w-full max-w-xl">
@@ -235,14 +380,30 @@ export default function VideoEditor() {
               <input type="range" min={0} max={duration} step={0.1} value={endTime} onChange={(e) => setEndTime(+e.target.value)} />
               <span>{endTime.toFixed(1)}</span>
             </label>
-            <label>Effect:
-              <select value={filter} onChange={(e) => setFilter(e.target.value)} className="bg-surface rounded-lg p-2 ml-2">
-                <option value="none">None</option>
-                <option value="grayscale">Grayscale</option>
-                <option value="sepia">Sepia</option>
-                <option value="invert">Invert</option>
-              </select>
-            </label>
+          </div>
+
+          <label>Effect:
+            <select value={filter} onChange={(e) => setFilter(e.target.value)} className="bg-surface rounded-lg p-2 ml-2">
+              <option value="none">None</option>
+              <option value="grayscale">Grayscale</option>
+              <option value="sepia">Sepia</option>
+              <option value="invert">Invert</option>
+            </select>
+          </label>
+
+          <div className="flex flex-wrap gap-4 justify-center">
+            {!cropMode && (
+              <>
+                <button onClick={enterCropMode} className="px-4 py-2 bg-surface rounded-lg">✂ Crop</button>
+                <button onClick={resetCrop} className="px-4 py-2 bg-surface rounded-lg">↺ Reset Crop</button>
+              </>
+            )}
+            {cropMode && (
+              <>
+                <button onClick={applyCrop} className="px-4 py-2 bg-green-600 text-white rounded-lg">✅ Apply Crop</button>
+                <button onClick={cancelCrop} className="px-4 py-2 bg-red-500 text-white rounded-lg">❌ Cancel</button>
+              </>
+            )}
           </div>
 
           <button onClick={exportVideo} disabled={processing} className="px-6 py-3 bg-primary text-white rounded-xl">
