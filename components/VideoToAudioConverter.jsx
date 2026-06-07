@@ -1,52 +1,66 @@
 // components/VideoToAudioConverter.jsx
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 
 export default function VideoToAudioConverter() {
   const [videoSrc, setVideoSrc] = useState(null);
   const [outputUrl, setOutputUrl] = useState(null);
   const [processing, setProcessing] = useState(false);
   const [error, setError] = useState(null);
+  const [videoReady, setVideoReady] = useState(false);
 
   const videoRef = useRef(null);
+  const recorderRef = useRef(null);
+
+  // Clean object URL on unmount
+  useEffect(() => {
+    return () => {
+      if (videoSrc) URL.revokeObjectURL(videoSrc);
+    };
+  }, [videoSrc]);
 
   const handleFile = (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    setVideoSrc(URL.createObjectURL(file));
+    const url = URL.createObjectURL(file);
+    setVideoSrc(url);
     setOutputUrl(null);
+    setError(null);
+    setProcessing(false);
+    setVideoReady(false);
+  };
+
+  const handleLoadedMetadata = () => {
+    setVideoReady(true);
     setError(null);
   };
 
-  const extractAudio = async () => {
+  const startExtraction = async () => {
     const video = videoRef.current;
-    if (!video) return;
+    if (!video || !videoReady) {
+      setError('Video not ready. Please wait or re‑upload.');
+      return;
+    }
+
+    // Check for audio track
+    if (!video.captureStream) {
+      setError('Your browser does not support captureStream.');
+      return;
+    }
 
     setProcessing(true);
     setError(null);
+    setOutputUrl(null);
 
     try {
-      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      
-      // Create a media element source from the video
-      const source = audioContext.createMediaElementSource(video);
-      
-      // Connect to destination (not needed for extraction, but required for graph)
-      // We'll use OfflineAudioContext to render the whole video
-      
-      // Since we can't use createMediaElementSource with OfflineAudioContext directly,
-      // we'll use a workaround: capture audio from video playing into a MediaRecorder
-      // or use Web Audio + MediaStream recording.
-      
-      // Method: Play video silently, capture audio via MediaStream
       const stream = video.captureStream();
       const audioTrack = stream.getAudioTracks()[0];
       if (!audioTrack) {
-        throw new Error('No audio track found in the video.');
+        throw new Error('No audio track found in this video.');
       }
 
-      // Use MediaRecorder to record audio only
       const audioStream = new MediaStream([audioTrack]);
       const recorder = new MediaRecorder(audioStream, { mimeType: 'audio/webm' });
+      recorderRef.current = recorder;
       const chunks = [];
 
       recorder.ondataavailable = (e) => {
@@ -58,29 +72,54 @@ export default function VideoToAudioConverter() {
         setOutputUrl(URL.createObjectURL(blob));
         setProcessing(false);
         video.pause();
+        recorderRef.current = null;
       };
 
-      // Start recording and play the video
+      recorder.onerror = (err) => {
+        setError('Recorder error: ' + err.message);
+        setProcessing(false);
+        video.pause();
+        recorderRef.current = null;
+      };
+
       recorder.start();
       video.currentTime = 0;
       video.play();
 
       // Stop when video ends
-      video.onended = () => {
-        recorder.stop();
-        video.onended = null;
+      const onEnded = () => {
+        if (recorder.state === 'recording') recorder.stop();
+        video.removeEventListener('ended', onEnded);
       };
+      video.addEventListener('ended', onEnded);
 
-      // Also stop if video errors
-      video.onerror = () => {
-        recorder.stop();
-        setError('An error occurred while processing the video.');
-        setProcessing(false);
+      // Also handle pause/error during playback
+      const onPause = () => {
+        if (processing && recorder.state === 'recording') {
+          // If paused manually, we stop extraction
+          recorder.stop();
+        }
       };
+      video.addEventListener('pause', onPause);
+
+      // Cleanup listeners on stop
+      const cleanup = () => {
+        video.removeEventListener('ended', onEnded);
+        video.removeEventListener('pause', onPause);
+      };
+      recorder.addEventListener('stop', cleanup, { once: true });
     } catch (err) {
-      console.error(err);
-      setError(err.message || 'Failed to extract audio.');
+      setError('Failed to start extraction: ' + err.message);
       setProcessing(false);
+    }
+  };
+
+  const stopExtraction = () => {
+    if (recorderRef.current && recorderRef.current.state === 'recording') {
+      recorderRef.current.stop();
+    }
+    if (videoRef.current) {
+      videoRef.current.pause();
     }
   };
 
@@ -91,16 +130,41 @@ export default function VideoToAudioConverter() {
 
       {videoSrc && (
         <>
-          <video ref={videoRef} src={videoSrc} className="hidden" controls={false} />
-          <p className="text-muted">Video loaded. Ready to extract audio.</p>
-          <button onClick={extractAudio} disabled={processing} className="px-6 py-3 bg-primary text-white rounded-xl">
-            {processing ? 'Extracting Audio...' : 'Extract Audio'}
-          </button>
-          {error && <div className="bg-red-900/80 text-white p-3 rounded-xl">{error}</div>}
+          <video
+            ref={videoRef}
+            src={videoSrc}
+            className="hidden"
+            onLoadedMetadata={handleLoadedMetadata}
+            controls={false}
+          />
+          {!videoReady && <p className="text-muted">Loading video metadata…</p>}
+          {videoReady && !processing && (
+            <p className="text-muted">Video ready. Click "Extract Audio" to begin.</p>
+          )}
+
+          <div className="flex gap-4">
+            <button
+              onClick={startExtraction}
+              disabled={!videoReady || processing}
+              className="px-6 py-3 bg-primary text-white rounded-xl disabled:opacity-50"
+            >
+              {processing ? 'Extracting Audio...' : 'Extract Audio'}
+            </button>
+            {processing && (
+              <button onClick={stopExtraction} className="px-4 py-2 bg-red-600 text-white rounded-xl">
+                ⏹ Stop
+              </button>
+            )}
+          </div>
+
+          {error && <div className="bg-red-900/80 text-white p-3 rounded-xl max-w-xl text-center">⚠️ {error}</div>}
+
           {outputUrl && (
-            <div className="flex flex-col items-center gap-2">
-              <audio controls src={outputUrl} className="w-full max-w-xl" />
-              <a href={outputUrl} download="extracted_audio.webm" className="text-accent underline">⬇ Download Audio (.webm)</a>
+            <div className="flex flex-col items-center gap-2 w-full max-w-xl">
+              <audio controls src={outputUrl} className="w-full" />
+              <a href={outputUrl} download="extracted_audio.webm" className="text-accent underline">
+                ⬇ Download Audio (.webm)
+              </a>
             </div>
           )}
         </>
