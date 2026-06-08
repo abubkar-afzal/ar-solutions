@@ -3,20 +3,24 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-  "dev": "node server.js",
-  "build": "next build",
-  "start": "node server.js"
-},
+    "dev": "node server.js",
+    "build": "next build",
+    "start": "node server.js"
+  },
   "dependencies": {
     "@ffmpeg/core": "^0.12.10",
     "@ffmpeg/ffmpeg": "^0.12.15",
     "@ffmpeg/util": "^0.12.2",
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^9.6.1",
+    "@remotion/cli": "^4.0.474",
+    "@remotion/player": "^4.0.474",
+    "@remotion/renderer": "^4.0.474",
     "axios": "^1.17.0",
     "next": "16.0.1",
     "react": "19.2.0",
     "react-dom": "19.2.0",
+    "remotion": "^4.0.474",
     "sqlite3": "^6.0.1",
     "three": "^0.184.0",
     "uuid": "^14.0.0"
